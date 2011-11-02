@@ -5,6 +5,8 @@
             ring.middleware.reload
             ring.middleware.params
             ring.middleware.stacktrace
+            ring.middleware.flash
+            ring.middleware.session
             ring.util.response
             clojure.set)
   (:require [clojure.java.jdbc :as sql]
@@ -29,7 +31,14 @@
       (if-let [user-info (.getUserInfo url)]
         {:user (first (str/split user-info #":"))
          :password (second (str/split user-info #":"))}))))
-
+(defn wrap-error [f]
+  (fn [req]
+    (let [x (atom nil)]
+      (try
+        (reset! x (f req))
+        (catch Exception e
+          (reset! x (assoc (redirect "/") :flash (str e)))))
+      @x)))
 (def db
   (merge
     {:classname "org.postgresql.Driver"
@@ -38,12 +47,16 @@
 (def my-app
   (app
    wrap-params
+   wrap-session
+   wrap-flash
+   wrap-error
    []
    {:get
     (fn [req]
       (let [todos (sql/with-connection db
                     (sql/with-query-results res
-                      [(str "select c.id, t.id as tid, t.task, t.done, c.name from"
+                      [(str "select c.id, t.id as tid, t.task, t.done,"
+                            " c.name from"
                             " Todos t"
                             " right join Categories c on t.category = c.id")]
                       (into #{} res)))
@@ -52,10 +65,12 @@
          (html [:html
                 [:head [:title "Hello World"]]
                 [:body
+                 [:h1 (:flash req)]
                  (for [category categories]
                    [:div
                     [:p (category 1)]
-                    [:form {:method "post" :action (str "/category/" (category 0) "/delete")}
+                    [:form {:method "post"
+                            :action (str "/category/" (category 0) "/delete")}
                      [:input {:type "submit" :value "Delete"}]]
                     (for [todo (select #(and (= (:id %) (category 0))
                                              (:tid %)) todos)]
@@ -63,11 +78,14 @@
                        [:tr
                        [:td {:width 200} (todo :task)]
                        [:td
-                        [:form {:method "post" :action (str "/todo/" (todo :tid) "/delete")}
+                        [:form {:method "post"
+                                :action (str "/todo/" (todo :tid) "/delete")}
                          [:input {:type "submit" :value "Delete"}]]]
                        [:td
                       [:form {:method "post" :action (str "/todo/" (todo :tid))}
-                       [:input {:type "checkbox" :name "done" :value "done" :checked (todo :done)}]
+                       [:input
+                        {:type "checkbox" :name "done"
+                         :value "done" :checked (todo :done)}]
                        [:input {:type "submit" :value "check"}]]]]])])
                  [:form {:method "post"}
                   "Category"
@@ -80,49 +98,50 @@
                   [:input {:name "name"}]
                   [:input {:type "submit"}]]]]))))
     :post
-    (fn [req]
-      (sql/with-connection db
-        (sql/transaction
-         (sql/with-query-results res
-           [(str "select c.id from categories c"
-                 " where c.name = ?"
-                 " limit 1")
-            (or ((req :params) "category") "abc")]
-           (sql/insert-record :todos {:task     ((req :params) "task")
-                                      :category (:id (first res))
-                                      :done false}))))
-      (redirect "/"))}
+     (fn [req]
+       (sql/with-connection db
+         (sql/transaction
+          (sql/with-query-results res
+            [(str "select c.id from categories c"
+                  " where c.name = ?"
+                  " limit 1")
+             (or ((req :params) "category") "abc")]
+            (sql/insert-record :todos {:task     ((req :params) "task")
+                                       :category (:id (first res))
+                                       :done false}))))
+       (redirect "/"))}
    ["todo" id]
    {:post
-    (fn [req]
-      (sql/with-connection db
-        (sql/do-prepared "update todos set done = ? where id = ?"
-                         [(= ((req :params) "done") "done") (Integer/parseInt id)]))
-      (redirect "/"))}
+     (fn [req]
+       (sql/with-connection db
+         (sql/do-prepared
+          "update todos set done = ? where id = ?"
+          [(= ((req :params) "done") "done") (Integer/parseInt id)]))
+       (redirect "/"))}
    ["todo" id "delete"]
    {:post
-    (fn [req]
-      (sql/with-connection db
-        (sql/do-prepared "delete from todos where todos.id = ?"
-                         [(Integer/parseInt id)]))
-      (redirect "/"))}
+     (fn [req]
+       (sql/with-connection db
+         (sql/do-prepared "delete from todos where todos.id = ?"
+                          [(Integer/parseInt id)]))
+       (redirect "/"))}
    ["category"]
    {:post
-    (fn [req]
-      (sql/with-connection db
-        (sql/do-prepared "insert into categories(name) values (?)"
-                         [((req :params) "name")]))
-      (redirect "/"))}
+     (fn [req]
+       (sql/with-connection db
+         (sql/do-prepared "insert into categories(name) values (?)"
+                          [((req :params) "name")]))
+       (redirect "/"))}
    ["category" id "delete"]
    {:post
-    (fn [req]
-      (sql/with-connection db
-        (sql/transaction
-         (sql/do-prepared "delete from todos where category = ?"
-                          [(Integer/parseInt id)])
-         (sql/do-prepared "delete from categories where id = ?"
-                          [(Integer/parseInt id)])))
-      (redirect "/"))}))
+     (fn [req]
+       (sql/with-connection db
+         (sql/transaction
+          (sql/do-prepared "delete from todos where category = ?"
+                           [(Integer/parseInt id)])
+          (sql/do-prepared "delete from categories where id = ?"
+                           [(Integer/parseInt id)])))
+       (redirect "/"))}))
 (def dev-app
   (app
    wrap-reload
